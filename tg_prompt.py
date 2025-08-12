@@ -18,6 +18,11 @@ import time
 import secrets
 import string
 from typing import Optional, List
+# Added robust HTTP session/retry imports
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import telebot.apihelper as apihelper
 
 # === SOZLAMALAR ===
 BOT_TOKEN = '8231571160:AAHgw1Dqrb4oAYN2euwq8OO20iC0tpmoBcI'
@@ -40,6 +45,38 @@ BONUS_REWARD_TEXTS = {
     5: "Expert mini‑PROM: Чек‑лист улучшения текста (ясность, структура, тон).",
     10: "Master mini‑PROM: Фреймворк решений: цель → альтернативы → риски → критерии.",
 }
+
+# Configure a resilient HTTP session for Telegram API before creating the bot
+try:
+    session = requests.Session()
+    try:
+        retries = Retry(
+            total=5,
+            connect=3,
+            read=3,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=frozenset(["GET", "POST"]),
+        )
+    except TypeError:
+        # For older urllib3 versions that use method_whitelist
+        retries = Retry(
+            total=5,
+            connect=3,
+            read=3,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+    adapter = HTTPAdapter(max_retries=retries, pool_connections=20, pool_maxsize=50)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    apihelper.SESSION = session
+    apihelper.CONNECT_TIMEOUT = 10
+    apihelper.READ_TIMEOUT = 55
+except Exception:
+    # Fail silently; polling wrapper below will still handle restarts
+    pass
+
 def channel_link(username: str) -> str:
     return f'https://t.me/{username.lstrip("@")}'
 
@@ -1373,4 +1410,18 @@ def catch_postsecret_wait(message: Message):
     bot.send_message(message.chat.id, "📣 E'lon yuborildi." if ok else "⚠️ E'lon yuborilmadi. /set_announce_channel bilan sozlang yoki botni kanalga admin qiling.")
 
 # === ISHGA TUSHURISH ===
-bot.polling(none_stop=True)
+if __name__ == "__main__":
+    try:
+        infinity = getattr(bot, "infinity_polling", None)
+        if callable(infinity):
+            # Keep read timeout higher than long_polling_timeout
+            infinity(timeout=55, long_polling_timeout=30, skip_pending=True)
+        else:
+            while True:
+                try:
+                    bot.polling(none_stop=True, interval=0, timeout=55, long_polling_timeout=30)
+                except Exception as polling_error:
+                    print(f"[WARN] Polling error: {polling_error}. Restarting in 5s...")
+                    time.sleep(5)
+    except KeyboardInterrupt:
+        pass
